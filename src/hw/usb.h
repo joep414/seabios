@@ -79,11 +79,11 @@ struct usbhub_op_s {
  ****************************************************************/
 
 // USB mandated timings (in ms)
-#define USB_TIME_SIGATT 100
+#define USB_TIME_SIGATT 300
 #define USB_TIME_ATTDB  100
 #define USB_TIME_DRST   10
 #define USB_TIME_DRSTR  50
-#define USB_TIME_RSTRCY 10
+#define USB_TIME_RSTRCY 50
 
 #define USB_TIME_STATUS  50
 #define USB_TIME_DATAIN  500

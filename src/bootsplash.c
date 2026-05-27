@@ -47,6 +47,8 @@ enable_vga_console(void)
     br.ax = 0x0003;
     call16_int10(&br);
 
+    if (CONFIG_CSM)
+        return;
     // Write to screen.
     printf("SeaBIOS (version %s)\n", VERSION);
     display_uuid();

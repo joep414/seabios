@@ -20,6 +20,8 @@
 #include "std/bda.h" // struct bios_data_area_s
 #include "std/optionrom.h" // struct rom_header
 #include "util.h" // copy_smbios_21
+#include "hw/usb.h"
+#include "string.h"
 
 #define UINT8 u8
 #define UINT16 u16
@@ -370,5 +372,202 @@ int csm_bootprio_pci(struct pci_device *pci)
             return csm_prio_to_seabios(bbs[i].BootPriority);
         }
     }
+    return -1;
+}
+
+static int parse_hex(const char *p)
+{
+    int value = 0;
+
+    if (!p)
+        return -1;
+
+    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+        p += 2;
+    }
+
+    for (;;) {
+        char c = *p;
+        int digit;
+
+        if (c >= '0' && c <= '9')
+            digit = c - '0';
+        else if (c >= 'a' && c <= 'f')
+            digit = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F')
+            digit = c - 'A' + 10;
+        else
+            break;
+
+        value = (value << 4) | digit;
+        p++;
+    }
+    return value;
+}
+
+#define MAX_USB_DEPTH 8
+
+static int uefi_usb_dev_chain(const char *p, int *ports,
+                                    int max_ports)
+{
+    if (!p || !*p || max_ports <= 0)
+        return 0;
+
+    // Skip leading slashes
+    while (*p == '/')
+        p++;
+
+    // End of string
+    if (!*p)
+        return 0;
+
+    int count = 0;
+
+    // Check for USB(...) node
+    if (p[0] == 'U' &&
+        p[1] == 'S' &&
+        p[2] == 'B' &&
+        p[3] == '(') {
+
+        const char *hex = p + 4;
+
+        ports[0] = parse_hex(hex);
+        count = 1;
+
+        // Skip to end of this USB(...) node
+        while (*hex && *hex != '/')
+            hex++;
+
+        // Recurse into the rest of the path
+        return count + uefi_usb_dev_chain(hex,
+                                            ports + 1,
+                                            max_ports - 1);
+    }
+
+    // Not a USB(...) node, skip this segment
+    while (*p && *p != '/')
+        p++;
+
+    return uefi_usb_dev_chain(p, ports, max_ports);
+}
+
+static int usb_dev_chain(struct usbdevice_s *dev, int *hub_ports, 
+                            int max_ports)
+{
+    if (!dev || !dev->hub)
+        return 0;
+
+    if (max_ports <= 0)
+        return -1;
+
+    int depth = usb_dev_chain(dev->hub->usbdev,
+                                hub_ports,
+                                max_ports - 1);
+
+    if (depth < 0)
+        return -1;
+
+    hub_ports[depth] = dev->port;
+
+    return depth + 1;
+}
+
+static int usb_dev_chain_equal(const int *chain1, int len1,
+                                const int *chain2, int len2)
+{
+    if (len1 != len2)
+        return 0;
+
+    for (int i = 0; i < len1; i++)
+        if (chain1[i] != chain2[i])
+            return 0;
+
+    return 1;
+}
+
+int csm_bootprio_usb(struct usbdevice_s *usbdev)
+{
+    if (!csm_boot_table) {
+        dprintf(3, "CSM-USB: no BBS table\n");
+        return -1;
+    }
+
+    if (!usbdev || !usbdev->hub || !usbdev->hub->cntl) {
+        dprintf(3, "CSM-USB: invalid usbdev or hub\n");
+        return -1;
+    }
+
+    // Only support PCI based USB controllers for now
+    struct pci_device *pci = usbdev->hub->cntl->pci;
+    if (!pci) {
+        dprintf(3, "CSM-USB: device has no PCI controller\n");
+        return -1;
+    }
+
+    u8 bus  = pci_bdf_to_bus(pci->bdf);
+    u8 dev  = pci_bdf_to_dev(pci->bdf);
+    u8 func = pci_bdf_to_fn(pci->bdf);
+
+    dprintf(3, "CSM-USB: matching PCI %02x:%02x.%x (usbdev port=%u addr=%u)\n",
+            bus, dev, func, usbdev->port, usbdev->devaddr);
+
+    int usbdev_ports[MAX_USB_DEPTH] = {};
+    int usbdev_count = usb_dev_chain(usbdev, usbdev_ports, MAX_USB_DEPTH);
+
+    if (usbdev_count <= 0) {
+        dprintf(3, "CSM-USB: no USB chain from usbdev\n");
+        return -1;
+    }
+
+    dprintf(3, "CSM-USB: SeaBIOS USB chain (%d ports): ", usbdev_count);
+    for (int i = 0; i < usbdev_count; i++)
+        dprintf(3, "%d ", usbdev_ports[i]);
+    dprintf(3, "\n");
+
+    BBS_TABLE *bbs = (void *)csm_boot_table->BbsTable;
+    int entry_count = csm_boot_table->NumberBbsEntries;
+
+    for (int i = 0; i < entry_count; i++) {
+
+        if (bbs[i].Bus      != bus ||
+            bbs[i].Device   != dev ||
+            bbs[i].Function != func)
+            continue;
+
+        const char *desc = (const char *)(
+            (bbs[i].DescStringSegment << 4) + bbs[i].DescStringOffset
+        );
+
+        if (!desc || !*desc)
+            continue;
+
+        dprintf(3, "CSM-USB: checking BBS[%d] DevicePath: %s\n", i, desc);
+
+        int dp_ports[MAX_USB_DEPTH] = {};
+        int dp_count = uefi_usb_dev_chain(desc, dp_ports, MAX_USB_DEPTH);
+
+        if (dp_count <= 0) {
+            dprintf(3, "CSM-USB:   no USB() nodes in DevicePath\n");
+            continue;
+        }
+
+        dprintf(3, "CSM-USB:   UEFI USB chain (%d ports): ", dp_count);
+        for (int j = 0; j < dp_count; j++)
+            dprintf(3, "%d ", dp_ports[j]);
+        dprintf(3, "\n");
+
+        if (usb_dev_chain_equal(usbdev_ports, usbdev_count,
+                                 dp_ports, dp_count)) {
+
+            dprintf(3, "CSM-USB:   MATCHED priority 0x%04x\n",
+                    bbs[i].BootPriority);
+
+            return csm_prio_to_seabios(bbs[i].BootPriority);
+        }
+
+        dprintf(3, "CSM-USB:   no match\n");
+    }
+
+    dprintf(3, "CSM-USB: no matching USB device found\n");
     return -1;
 }

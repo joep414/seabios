@@ -121,6 +121,7 @@ struct cb_header *find_cb_table(void);
 int csm_bootprio_fdc(struct pci_device *pci, int port, int fdid);
 int csm_bootprio_ata(struct pci_device *pci, int chanid, int slave);
 int csm_bootprio_pci(struct pci_device *pci);
+int csm_bootprio_usb(struct usbdevice_s *usbdev);
 
 // fw/mptable.c
 void mptable_setup(void);

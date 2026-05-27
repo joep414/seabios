@@ -421,6 +421,8 @@ build_usb_path(char *buf, int max, struct usbhub_s *hub)
 
 int bootprio_find_usb(struct usbdevice_s *usbdev, int lun)
 {
+    if (CONFIG_CSM)
+        return csm_bootprio_usb(usbdev);
     if (!CONFIG_BOOTORDER)
         return -1;
     // Find usb - examples:
