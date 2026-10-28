@@ -429,7 +429,7 @@ usb_hub_port_setup(void *data)
         if (ret > 0)
             // Device connected.
             break;
-        if (ret < 0 || timer_check(hub->detectend))
+        if (ret < 0 || timer_check(hub->detectend*3))
             // No device found.
             goto done;
         msleep(5);
